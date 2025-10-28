@@ -552,19 +552,23 @@ class FractionalWindow(QMainWindow):
         band_box = QGroupBox("Bands")
         band_layout = QVBoxLayout(band_box)
         self.epistemic_cb = QCheckBox("Epistemic")
-        self.epistemic_cb.setChecked(True)
+        self.epistemic_cb.setChecked(False)
+        self.epistemic_cb.setToolTip("Parameter uncertainty only (advanced)")
         self.epistemic_cb.stateChanged.connect(self._update_forecast_plot)
         band_layout.addWidget(self.epistemic_cb)
         self.total_cb = QCheckBox("Total")
-        self.total_cb.setChecked(True)
+        self.total_cb.setChecked(False)
+        self.total_cb.setToolTip("Parameter + observation noise (advanced)")
         self.total_cb.stateChanged.connect(self._update_forecast_plot)
         band_layout.addWidget(self.total_cb)
         self.conformal_cb = QCheckBox("Conformal")
         self.conformal_cb.setChecked(True)
+        self.conformal_cb.setToolTip("Distribution-free guaranteed coverage")
         self.conformal_cb.stateChanged.connect(self._update_forecast_plot)
         band_layout.addWidget(self.conformal_cb)
         self.hybrid_cb = QCheckBox("Hybrid")
         self.hybrid_cb.setChecked(True)
+        self.hybrid_cb.setToolTip("Conservative envelope (union of intervals)")
         self.hybrid_cb.stateChanged.connect(self._update_forecast_plot)
         band_layout.addWidget(self.hybrid_cb)
         side.addWidget(band_box)
@@ -852,7 +856,7 @@ class FractionalWindow(QMainWindow):
                         transform=ax.transAxes,
                         ha="left",
                         va="center",
-                        fontsize=9,
+                        fontsize=10,
                         bbox=dict(boxstyle="round,pad=0.5", facecolor="white", alpha=0.75, edgecolor="#888888"),
                     )
                 target_label = self._target_column or "Capacitance"
@@ -865,7 +869,7 @@ class FractionalWindow(QMainWindow):
                 ax.grid(True, alpha=0.25)
                 if legend_entries:
                     handles, labels_txt = zip(*legend_entries)
-                    ax.legend(handles, labels_txt, loc="upper right", frameon=True, framealpha=0.85, fontsize=9, ncol=2)
+                    ax.legend(handles, labels_txt, loc="upper right", frameon=True, framealpha=0.85, fontsize=11, ncol=2)
                 ax.spines["top"].set_visible(False)
                 ax.spines["right"].set_visible(False)
                 ax.tick_params(labelsize=10)
@@ -1135,7 +1139,7 @@ class FractionalWindow(QMainWindow):
         ax.grid(True, alpha=0.25)
         if legend_entries:
             handles, labels = zip(*legend_entries)
-            ax.legend(handles, labels, loc="upper right", frameon=True, framealpha=0.85, fontsize=9)
+            ax.legend(handles, labels, loc="upper right", frameon=True, framealpha=0.85, fontsize=11)
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
         ax.tick_params(labelsize=10)
@@ -1669,7 +1673,7 @@ class FractionalWindow(QMainWindow):
                     color=EPISTEMIC_COLOR,
                     alpha=0.18,
                 )
-                _legend(epi_handle, "Epistemic band (model)")
+                _legend(epi_handle, "Epistemic")
                 ax.plot(times[mask], ep_low[mask], color=EPISTEMIC_COLOR, linewidth=1.0, linestyle="--", alpha=0.9)
                 ax.plot(times[mask], ep_high[mask], color=EPISTEMIC_COLOR, linewidth=1.0, linestyle="--", alpha=0.9)
         if self.total_cb.isChecked() and np.isfinite(tot_low).any():
@@ -1682,7 +1686,7 @@ class FractionalWindow(QMainWindow):
                     color=TOTAL_COLOR,
                     alpha=0.18,
                 )
-                _legend(total_handle, "Total band (model+noise)")
+                _legend(total_handle, "Total")
                 ax.plot(times[mask], tot_low[mask], color=TOTAL_COLOR, linewidth=1.0, linestyle="-.", alpha=0.85)
                 ax.plot(times[mask], tot_high[mask], color=TOTAL_COLOR, linewidth=1.0, linestyle="-.", alpha=0.85)
         if self.conformal_cb.isChecked() and np.isfinite(conf_low).any():
@@ -1695,7 +1699,7 @@ class FractionalWindow(QMainWindow):
                     color=CONFORMAL_COLOR,
                     alpha=0.22,
                 )
-                _legend(conf_handle, "Conformal interval (guaranteed)")
+                _legend(conf_handle, "Conformal")
                 ax.plot(times[mask], conf_low[mask], color="#b89560", linewidth=1.2, linestyle="-")
                 ax.plot(times[mask], conf_high[mask], color="#b89560", linewidth=1.2, linestyle="-")
         if self.hybrid_cb.isChecked() and np.isfinite(hybrid_low).any():
@@ -1708,7 +1712,7 @@ class FractionalWindow(QMainWindow):
                     color=HYBRID_COLOR,
                     alpha=0.18,
                 )
-                _legend(hybrid_handle, "Hybrid interval (union)")
+                _legend(hybrid_handle, "Hybrid")
                 ax.plot(times[mask], hybrid_low[mask], color=HYBRID_COLOR, linewidth=1.3, linestyle="-")
                 ax.plot(times[mask], hybrid_high[mask], color=HYBRID_COLOR, linewidth=1.3, linestyle="-")
 
@@ -1722,7 +1726,7 @@ class FractionalWindow(QMainWindow):
         ax.grid(True, alpha=0.25)
         if legend_entries:
             handles, labels = zip(*legend_entries)
-            ax.legend(handles, labels, loc="upper right", frameon=True, framealpha=0.85, fontsize=9, ncol=2, columnspacing=1.2)
+            ax.legend(handles, labels, loc="upper right", frameon=True, framealpha=0.85, fontsize=11, ncol=2, columnspacing=1.2)
         metrics = result.get("metrics", {})
         summary_lines = []
         rmse_val = metrics.get("rmse_forecast")
@@ -1742,7 +1746,7 @@ class FractionalWindow(QMainWindow):
                 transform=ax.transAxes,
                 ha="left",
                 va="center",
-                fontsize=9,
+                fontsize=10,
                 bbox=dict(boxstyle="round,pad=0.5", facecolor="white", alpha=0.75, edgecolor="#888888"),
             )
         ax.spines["top"].set_visible(False)
@@ -1769,7 +1773,8 @@ class FractionalWindow(QMainWindow):
             if "error" in mcmc_info:
                 lines.append(f"  MCMC status: {mcmc_info['error']}")
         tldr = (
-            "TL;DR: Epistemic band from fractional posterior, total band adds noise, conformal CV+ guarantees coverage, hybrid takes the widest envelope."
+            "TL;DR: Epistemic = parameter uncertainty only. Total = parameters + noise. "
+            "Conformal = distribution-free guaranteed coverage. Hybrid = conservative envelope (widest)."
         )
         lines.insert(0, tldr)
         self.forecast_metrics.setPlainText("\n".join(lines))
