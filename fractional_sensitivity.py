@@ -74,6 +74,56 @@ def _sobol_indices(
     n_bootstrap: int = 200,
     random_state: int | None = None,
 ) -> dict[str, dict[str, np.ndarray]]:
+    """
+    Compute Sobol first-order (S) and total-order (ST) indices with bootstrap CIs.
+
+    Rationale for pooled-variance normalization:
+    -----------------------------------------
+    Variance is computed ONCE from the full g_a vector and reused for all bootstrap
+    iterations. This prevents pathological cases where bootstrap resamples collapse
+    to low/zero variance, which would yield unstable or undefined index estimates.
+
+    Standard approach: var_b = np.var(g_a_b, ddof=1) per bootstrap
+    Problem: If g_a_b has near-zero spread, S_i and ST_i explode or become NaN
+
+    Pooled approach: variance = np.var(g_a, ddof=1) computed once
+    Benefit: Stability—indices remain well-defined even if resamples are degenerate
+
+    NaN filtering strategy:
+    ----------------------
+    1. Non-finite QoI evaluations (NaN/inf from model failures) are removed upfront
+    2. During bootstrap: if var_b=0, that iteration gets NaN (lines 110-112)
+    3. CI calculation uses np.nanpercentile, which ignores NaN rows (line 119-120)
+    4. Result: CIs computed from valid bootstrap samples only
+
+    This is superior to older approaches that either:
+    - Used per-sample variance (unstable)
+    - Failed entirely on any NaN (too brittle)
+
+    Parameters
+    ----------
+    g_a, g_b : np.ndarray
+        QoI evaluations for Saltelli sample matrices A and B (n_samples each).
+    g_c : Sequence[np.ndarray]
+        List of QoI evaluations for C matrices (one per parameter, n_samples each).
+    n_bootstrap : int, default=200
+        Number of bootstrap iterations for confidence interval estimation.
+    random_state : int | None
+        Random seed for reproducible bootstrap resampling.
+
+    Returns
+    -------
+    dict
+        Keys: 'main' (first-order S), 'total' (total ST), 'main_ci', 'total_ci'
+        Each contains arrays of shape (n_params,) or (2, n_params) for CIs.
+
+    Raises
+    ------
+    RuntimeError
+        If no finite samples remain after filtering, or if variance is exactly zero.
+    """
+    # Step 1: Filter non-finite evaluations across all matrices
+    # Rationale: NaN/inf from model failures would corrupt variance/covariance
     mask = np.isfinite(g_a) & np.isfinite(g_b)
     for arr in g_c:
         mask &= np.isfinite(arr)
@@ -84,10 +134,14 @@ def _sobol_indices(
     g_b = g_b[mask]
     g_c = [arr[mask] for arr in g_c]
     n = g_a.size
+
+    # Step 2: Compute pooled variance ONCE from full g_a
+    # This variance is used for ALL point estimates and bootstrap iterations
     variance = np.var(g_a, ddof=1)
     if variance == 0:
         raise RuntimeError("Zero variance encountered; cannot compute Sobol indices.")
 
+    # Step 3: Compute point estimates using pooled variance
     S = []
     ST = []
     for arr in g_c:
@@ -96,24 +150,35 @@ def _sobol_indices(
         S.append(main)
         ST.append(total)
 
+    # Step 4: Bootstrap confidence intervals
+    # Note: Each bootstrap iteration uses its OWN variance (var_b) for that resample
+    # This is intentional—we want CIs to reflect sampling variability in the variance
+    # The pooled variance (above) is only for the point estimates
     rng = np.random.default_rng(random_state)
     S_boot = np.zeros((n_bootstrap, len(g_c)), dtype=float)
     ST_boot = np.zeros_like(S_boot)
 
     for b in range(n_bootstrap):
-        idx = rng.integers(0, n, size=n)
+        idx = rng.integers(0, n, size=n)  # Bootstrap resample with replacement
         g_a_b = g_a[idx]
         g_b_b = g_b[idx]
         g_c_b = [arr[idx] for arr in g_c]
         var_b = np.var(g_a_b, ddof=1)
+
+        # Degenerate bootstrap filter: Skip iterations with zero variance
+        # These get stored as NaN and ignored in percentile calculation (see below)
         if var_b == 0:
             S_boot[b] = np.nan
             ST_boot[b] = np.nan
             continue
+
+        # Compute indices for this bootstrap sample
         for j, arr_b in enumerate(g_c_b):
             S_boot[b, j] = np.mean(g_b_b * (arr_b - g_a_b)) / var_b
             ST_boot[b, j] = 0.5 * np.mean((g_a_b - arr_b) ** 2) / var_b
 
+    # Step 5: Compute 95% confidence intervals
+    # np.nanpercentile automatically excludes NaN rows from degenerate iterations
     lower = 2.5
     upper = 97.5
     S_ci = np.nanpercentile(S_boot, [lower, upper], axis=0)

@@ -32,7 +32,6 @@ from PyQt5.QtWidgets import (
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
-    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -110,6 +109,121 @@ class AnalysisWorker(QRunnable):
 
 
 
+def _draw_sobol_panel(
+    ax: "plt.Axes",
+    S: np.ndarray,
+    ST: np.ndarray,
+    params: list[str],
+    S_ci: Optional[np.ndarray] = None,
+    ST_ci: Optional[np.ndarray] = None,
+    title: str = "",
+) -> None:
+    """
+    Draw grouped Sobol bars with confidence intervals on a single axis.
+
+    This helper consolidates Sobol plotting logic for both forecast-backed
+    and prior-sweep modes, ensuring consistent styling and spacing.
+
+    Parameters
+    ----------
+    ax : matplotlib Axes
+        Target axis for drawing.
+    S : np.ndarray
+        First-order Sobol indices (shape: n_params).
+    ST : np.ndarray
+        Total Sobol indices (shape: n_params).
+    params : list[str]
+        Parameter names for x-axis labels.
+    S_ci : np.ndarray | None
+        95% CI for first-order indices (shape: 2 × n_params), optional.
+    ST_ci : np.ndarray | None
+        95% CI for total indices (shape: 2 × n_params), optional.
+    title : str
+        Panel title (e.g., QoI name).
+    """
+    if not MATPLOTLIB_AVAILABLE:
+        return
+
+    x = np.arange(len(params))
+    width = 0.36  # Bar width for grouped bars
+
+    # Draw bars with improved spacing
+    bars_main = ax.bar(
+        x - width / 2,
+        S,
+        width,
+        label="First-order (S)",
+        color=BAR_MAIN_COLOR,
+        alpha=0.85,
+        edgecolor="#2c3e50",
+        linewidth=0.5,
+    )
+    bars_total = ax.bar(
+        x + width / 2,
+        ST,
+        width,
+        label="Total (ST)",
+        color=BAR_TOTAL_COLOR,
+        alpha=0.75,
+        edgecolor="#34495e",
+        linewidth=0.5,
+    )
+
+    # Add error bars with improved visibility
+    if S_ci is not None and S_ci.shape[0] == 2:
+        lower, upper = S_ci
+        yerr = np.vstack([S - lower, upper - S])
+        ax.errorbar(
+            x - width / 2,
+            S,
+            yerr=yerr,
+            fmt="none",
+            ecolor="#2c3e50",
+            elinewidth=1.2,
+            capsize=5,
+            capthick=1.2,
+            label="95% CI",
+        )
+
+    if ST_ci is not None and ST_ci.shape[0] == 2:
+        lower, upper = ST_ci
+        yerr = np.vstack([ST - lower, upper - ST])
+        ax.errorbar(
+            x + width / 2,
+            ST,
+            yerr=yerr,
+            fmt="none",
+            ecolor="#34495e",
+            elinewidth=1.2,
+            capsize=5,
+            capthick=1.2,
+        )
+
+    # Styling
+    ax.set_xticks(x)
+    ax.set_xticklabels(params, fontsize=10)
+    ax.set_ylabel("Sobol Index", fontsize=11)
+    ax.set_ylim(0.0, 1.05)  # Sobol indices are in [0, 1]
+    ax.grid(True, axis="y", alpha=0.25, linestyle=":", linewidth=0.8)
+
+    if title:
+        ax.set_title(title, fontsize=11, fontweight="bold", pad=10)
+
+    # Legend positioned to avoid bar overlap
+    ax.legend(
+        loc="upper right",
+        frameon=True,
+        framealpha=0.9,
+        fontsize=9,
+        edgecolor="#888888",
+    )
+
+    # Clean spines
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.tick_params(labelsize=9)
+
+
 class FractionalWindow(QMainWindow):
     """Application window for fractional-kinetics forecasting."""
 
@@ -129,8 +243,6 @@ class FractionalWindow(QMainWindow):
         self.forecast_data: Optional[Dict[str, Any]] = None
         self.current_mode: str = "forecast"
         self.sensitivity_tab: Optional[QWidget] = None
-        self.sens_study_fig = None
-        self.sens_study_canvas = None
         self._current_model: str = "fk"
 
         self._active_worker: Optional[AnalysisWorker] = None
@@ -355,24 +467,32 @@ class FractionalWindow(QMainWindow):
 
 
     def _build_sensitivity_tab(self) -> None:
+        """
+        Build a unified Sensitivity tab showing forecast-backed Sobol indices.
+
+        This tab displays Sobol sensitivity analysis results from the FK forecast.
+        The priors are automatically anchored at the MAP fit from the data, and
+        Sobol indices quantify parameter influence on downstream QoIs like
+        capacitance predictions and failure times.
+        """
         sens = QWidget()
         self.sensitivity_tab = sens
         layout = QVBoxLayout(sens)
         layout.setSpacing(12)
 
-        mode_row = QHBoxLayout()
-        mode_label = QLabel("Sensitivity mode:")
-        mode_label.setToolTip("Choose how Sobol indices are generated.")
-        mode_row.addWidget(mode_label)
-        self.sens_mode_combo = QComboBox()
-        self.sens_mode_combo.addItem("Data-backed (uses latest FK forecast)", userData="data")
-        self.sens_mode_combo.addItem("Prior-driven (sample from priors only)", userData="prior")
-        self.sens_mode_combo.setToolTip("Select data-backed after running the FK forecast with Sobol enabled. Choose prior-driven to explore priors without data.")
-        self.sens_mode_combo.currentIndexChanged.connect(self._update_sensitivity_mode)
-        mode_row.addWidget(self.sens_mode_combo)
-        mode_row.addStretch(1)
-        layout.addLayout(mode_row)
+        # Explanatory header
+        info_group = QGroupBox("About Sensitivity Analysis")
+        info_layout = QVBoxLayout(info_group)
+        info_text = QLabel(
+            "Sobol indices quantify parameter influence on forecast quantities of interest (QoIs). "
+            "Run the FK forecast with 'Sobol indices' enabled in the Overview tab, then load results below. "
+            "Priors are anchored at the MAP fit from your data, ensuring physically-informed sensitivity."
+        )
+        info_text.setWordWrap(True)
+        info_layout.addWidget(info_text)
+        layout.addWidget(info_group)
 
+        # Sobol configuration (shared with forecast)
         config_group = QGroupBox("Sobol configuration")
         config_form = QFormLayout(config_group)
         config_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
@@ -380,23 +500,39 @@ class FractionalWindow(QMainWindow):
         self.sobol_horizons_edit = QLineEdit("200.0")
         self.sobol_horizons_edit.setPlaceholderText("Comma-separated horizons (e.g., 200, 400)")
         self.sobol_horizons_edit.setClearButtonEnabled(True)
+        self.sobol_horizons_edit.setToolTip(
+            "Time horizons (hours) for capacitance predictions. "
+            "Example: '200, 400' evaluates sensitivity at 200h and 400h."
+        )
         config_form.addRow("Horizons", self.sobol_horizons_edit)
 
         self.thresholds_edit = QLineEdit("0.80, 0.70")
         self.thresholds_edit.setPlaceholderText("0 < q < 1 (e.g., 0.85, 0.70)")
         self.thresholds_edit.setClearButtonEnabled(True)
+        self.thresholds_edit.setToolTip(
+            "Failure thresholds as fractions of initial capacitance. "
+            "Example: '0.80, 0.70' computes time-to-80% and time-to-70%."
+        )
         config_form.addRow("Failure thresholds", self.thresholds_edit)
 
         self.sobol_samples_spin = QSpinBox()
         self.sobol_samples_spin.setRange(128, 16384)
         self.sobol_samples_spin.setSingleStep(128)
         self.sobol_samples_spin.setValue(2048)
+        self.sobol_samples_spin.setToolTip(
+            "Number of Sobol samples for variance-based decomposition. "
+            "Higher values improve accuracy but increase computation time. Recommended: 2048-4096."
+        )
         config_form.addRow("Sobol samples", self.sobol_samples_spin)
 
         self.sobol_bootstrap_spin = QSpinBox()
         self.sobol_bootstrap_spin.setRange(10, 2000)
         self.sobol_bootstrap_spin.setSingleStep(10)
         self.sobol_bootstrap_spin.setValue(200)
+        self.sobol_bootstrap_spin.setToolTip(
+            "Bootstrap iterations for confidence intervals on Sobol indices. "
+            "Recommended: 200 for stable CI estimates."
+        )
         config_form.addRow("Bootstrap draws", self.sobol_bootstrap_spin)
 
         layout.addWidget(config_group)
@@ -406,133 +542,39 @@ class FractionalWindow(QMainWindow):
         self.sobol_samples_spin.valueChanged.connect(lambda _: self._update_sensitivity_summary())
         self.sobol_bootstrap_spin.valueChanged.connect(lambda _: self._update_sensitivity_summary())
 
-        self.sens_mode_stack = QStackedWidget()
-        layout.addWidget(self.sens_mode_stack, stretch=1)
-
-        data_page = QWidget()
-        data_layout = QVBoxLayout(data_page)
-        data_layout.setSpacing(8)
-        info_label = QLabel("Run the FK forecast with Sobol indices enabled, then click below to load the latest results.")
-        info_label.setWordWrap(True)
-        data_layout.addWidget(info_label)
+        # Visualization controls
         controls = QHBoxLayout()
-        controls.addWidget(QLabel("Quantity:"))
+        controls.addWidget(QLabel("Quantity of Interest:"))
         self.sens_qoi_combo = QComboBox()
         self.sens_qoi_combo.currentIndexChanged.connect(self._update_sensitivity_plot)
-        controls.addWidget(self.sens_qoi_combo)
-        controls.addStretch(1)
-        data_layout.addLayout(controls)
+        self.sens_qoi_combo.setToolTip(
+            "Select which QoI to display. Options include capacitance at specific horizons "
+            "and time-to-failure for various thresholds."
+        )
+        controls.addWidget(self.sens_qoi_combo, stretch=1)
 
+        self.sens_refresh_btn = QPushButton("Load latest FK Sobol")
+        self.sens_refresh_btn.setEnabled(False)
+        self.sens_refresh_btn.setToolTip(
+            "Pull Sobol indices from the most recent FK forecast. "
+            "Enable 'Sobol indices' in the Overview tab and run the forecast first."
+        )
+        self.sens_refresh_btn.clicked.connect(self._refresh_data_backed_sobol)
+        controls.addWidget(self.sens_refresh_btn)
+
+        layout.addLayout(controls)
+
+        # Canvas for Sobol bar charts
         if MATPLOTLIB_AVAILABLE:
             self.sens_fig = Figure(figsize=(10, 8), dpi=300)
             self.sens_fig.set_facecolor("white")
             self.sens_canvas = FigureCanvas(self.sens_fig)
-            data_layout.addWidget(self.sens_canvas, stretch=1)
+            layout.addWidget(self.sens_canvas, stretch=1)
         else:  # pragma: no cover
-            data_layout.addWidget(QLabel("Matplotlib not available."))
+            layout.addWidget(QLabel("Matplotlib not available."))
 
-        refresh_row = QHBoxLayout()
-        self.sens_refresh_btn = QPushButton("Load latest FK Sobol")
-        self.sens_refresh_btn.setEnabled(False)
-        self.sens_refresh_btn.setToolTip("Pull Sobol indices from the most recent FK forecast run.")
-        self.sens_refresh_btn.clicked.connect(self._refresh_data_backed_sobol)
-        refresh_row.addWidget(self.sens_refresh_btn)
-        refresh_row.addStretch(1)
-        data_layout.addLayout(refresh_row)
-        self.sens_mode_stack.addWidget(data_page)
-
-        prior_page = QWidget()
-        prior_layout = QVBoxLayout(prior_page)
-        prior_layout.setSpacing(10)
-
-        prior_group = QGroupBox("Fractional prior configuration")
-        prior_form = QFormLayout(prior_group)
-        prior_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
-
-        self.sens_c0_mean = QDoubleSpinBox()
-        self.sens_c0_mean.setRange(1e-3, 1e6)
-        self.sens_c0_mean.setDecimals(4)
-        self.sens_c0_mean.setValue(1.0)
-        prior_form.addRow("C0 mean", self.sens_c0_mean)
-
-        self.sens_c0_sigma = QDoubleSpinBox()
-        self.sens_c0_sigma.setRange(0.01, 2.0)
-        self.sens_c0_sigma.setDecimals(3)
-        self.sens_c0_sigma.setValue(0.2)
-        prior_form.addRow("C0 log-sigma", self.sens_c0_sigma)
-
-        self.sens_k_mean = QDoubleSpinBox()
-        self.sens_k_mean.setRange(1e-6, 10.0)
-        self.sens_k_mean.setDecimals(6)
-        self.sens_k_mean.setValue(0.01)
-        prior_form.addRow("k mean", self.sens_k_mean)
-
-        self.sens_k_sigma = QDoubleSpinBox()
-        self.sens_k_sigma.setRange(0.01, 2.0)
-        self.sens_k_sigma.setDecimals(3)
-        self.sens_k_sigma.setValue(0.3)
-        prior_form.addRow("k log-sigma", self.sens_k_sigma)
-
-        self.sens_alpha_mean = QDoubleSpinBox()
-        self.sens_alpha_mean.setRange(0.01, 0.99)
-        self.sens_alpha_mean.setDecimals(3)
-        self.sens_alpha_mean.setValue(0.7)
-        prior_form.addRow("alpha mean", self.sens_alpha_mean)
-
-        self.sens_alpha_conc = QDoubleSpinBox()
-        self.sens_alpha_conc.setRange(1.0, 200.0)
-        self.sens_alpha_conc.setDecimals(2)
-        self.sens_alpha_conc.setValue(10.0)
-        prior_form.addRow("alpha concentration", self.sens_alpha_conc)
-
-        self.sens_finf_mean = QDoubleSpinBox()
-        self.sens_finf_mean.setRange(0.01, 0.99)
-        self.sens_finf_mean.setDecimals(3)
-        self.sens_finf_mean.setValue(0.2)
-        prior_form.addRow("f_inf mean", self.sens_finf_mean)
-
-        self.sens_finf_conc = QDoubleSpinBox()
-        self.sens_finf_conc.setRange(1.0, 200.0)
-        self.sens_finf_conc.setDecimals(2)
-        self.sens_finf_conc.setValue(10.0)
-        prior_form.addRow("f_inf concentration", self.sens_finf_conc)
-
-        prior_layout.addWidget(prior_group)
-
-        note_label = QLabel("Uses the shared Sobol configuration above for horizons, thresholds, samples, and bootstraps.")
-        note_label.setWordWrap(True)
-        prior_layout.addWidget(note_label)
-
-        control_row = QHBoxLayout()
-        self.sens_run_button = QPushButton("Run sensitivity study")
-        self.sens_run_button.clicked.connect(self._run_sensitivity_study)
-        control_row.addWidget(self.sens_run_button)
-        if MATPLOTLIB_AVAILABLE:
-            self.sens_save_plot_btn = QPushButton("Save sensitivity study plot...")
-            self.sens_save_plot_btn.setEnabled(False)
-            self.sens_save_plot_btn.clicked.connect(self._save_sensitivity_study_plot)
-            control_row.addWidget(self.sens_save_plot_btn)
-        control_row.addStretch(1)
-        prior_layout.addLayout(control_row)
-
-        if MATPLOTLIB_AVAILABLE:
-            self.sens_study_fig = Figure(figsize=(10, 8), dpi=300)
-            self.sens_study_fig.set_facecolor("white")
-            self.sens_study_canvas = FigureCanvas(self.sens_study_fig)
-            prior_layout.addWidget(self.sens_study_canvas, stretch=1)
-        else:  # pragma: no cover
-            prior_layout.addWidget(QLabel("Matplotlib not available."), stretch=1)
-
-        self.sens_log = QPlainTextEdit()
-        self.sens_log.setReadOnly(True)
-        prior_layout.addWidget(self.sens_log, stretch=1)
-
-        self.sens_mode_stack.addWidget(prior_page)
-
-        self.sens_study_results: Dict[str, Dict[str, Any]] | None = None
         self.tabs.addTab(sens, "Sensitivity")
         self._update_sensitivity_summary()
-        self._update_sensitivity_mode()
 
 
     def _build_forecast_tab(self) -> None:
@@ -675,7 +717,6 @@ class FractionalWindow(QMainWindow):
         if hasattr(self, "sensitivity_config_btn"):
             self.sensitivity_config_btn.setEnabled(is_fk)
         self._update_sensitivity_summary()
-        self._update_sensitivity_mode()
 
     def _open_sensitivity_tab(self) -> None:
         if hasattr(self, "tabs") and getattr(self, "sensitivity_tab", None) is not None:
@@ -695,19 +736,6 @@ class FractionalWindow(QMainWindow):
     def _update_sensitivity_summary(self) -> None:
         if hasattr(self, "sensitivity_summary"):
             self.sensitivity_summary.setText(self._format_sensitivity_summary())
-
-    def _update_sensitivity_mode(self) -> None:
-        mode_widget = getattr(self, "sens_mode_combo", None)
-        current = mode_widget.currentData() if mode_widget is not None else "data"
-        if hasattr(self, "sens_mode_stack") and self.sens_mode_stack is not None:
-            self.sens_mode_stack.setCurrentIndex(0 if current == "data" else 1)
-        if hasattr(self, "sens_refresh_btn"):
-            self.sens_refresh_btn.setEnabled(current == "data" and bool(getattr(self, "sens_data", None)))
-        allow_prior = current == "prior" and self.current_mode == "sensitivity"
-        if hasattr(self, "sens_run_button"):
-            self.sens_run_button.setEnabled(allow_prior and self._active_worker is None)
-        if hasattr(self, "sens_save_plot_btn"):
-            self.sens_save_plot_btn.setEnabled(allow_prior and bool(self.sens_study_results))
 
     def _refresh_data_backed_sobol(self) -> None:
         if not self._last_result:
@@ -1172,225 +1200,6 @@ class FractionalWindow(QMainWindow):
         self._pending_model = None
         self._pending_times = None
         self._pending_values = None
-        self.sens_study_results = None
-
-    def _run_sensitivity_study(self) -> None:
-        if self._active_worker is not None:
-            return
-        try:
-            thresholds = self._parse_float_list(
-                self.thresholds_edit.text(),
-                min_value=0.0,
-                max_value=1.0,
-                field_name="failure threshold",
-            )
-        except ValueError as exc:
-            QMessageBox.warning(self, "Invalid thresholds", str(exc))
-            return
-        try:
-            horizons = self._parse_float_list(
-                self.sobol_horizons_edit.text(),
-                min_value=0.0,
-                field_name="horizon",
-            )
-        except ValueError as exc:
-            QMessageBox.warning(self, "Invalid horizons", str(exc))
-            return
-        params = {
-            "c0_mean": float(self.sens_c0_mean.value()),
-            "c0_sigma": float(self.sens_c0_sigma.value()),
-            "k_mean": float(self.sens_k_mean.value()),
-            "k_sigma": float(self.sens_k_sigma.value()),
-            "alpha_mean": float(self.sens_alpha_mean.value()),
-            "alpha_conc": float(self.sens_alpha_conc.value()),
-            "finf_mean": float(self.sens_finf_mean.value()),
-            "finf_conc": float(self.sens_finf_conc.value()),
-            "horizons": horizons,
-            "thresholds": thresholds,
-            "samples": int(self.sobol_samples_spin.value()),
-            "bootstrap": int(self.sobol_bootstrap_spin.value()),
-        }
-        self.sens_run_button.setEnabled(False)
-        if MATPLOTLIB_AVAILABLE and hasattr(self, "sens_save_plot_btn"):
-            self.sens_save_plot_btn.setEnabled(False)
-        self.sens_log.clear()
-        self.status_label.setText("Running sensitivity study…")
-        QApplication.setOverrideCursor(Qt.WaitCursor)
-        self._update_sensitivity_mode()
-
-        worker = AnalysisWorker(self._run_sensitivity_task, params)
-        worker.signals.finished.connect(self._on_sensitivity_study_success)
-        worker.signals.error.connect(self._on_sensitivity_study_error)
-        self._active_worker = worker
-        self.thread_pool.start(worker)
-
-    def _run_sensitivity_task(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        c0_mean = params["c0_mean"]
-        k_mean = params["k_mean"]
-        alpha_mean = params["alpha_mean"]
-        finf_mean = params["finf_mean"]
-        c0_sigma = params["c0_sigma"]
-        k_sigma = params["k_sigma"]
-        alpha_conc = params["alpha_conc"]
-        finf_conc = params["finf_conc"]
-        horizons = params["horizons"]
-        thresholds = params["thresholds"]
-        samples = params["samples"]
-        bootstrap = params["bootstrap"]
-
-        if not 0 < alpha_mean < 1:
-            raise ValueError("alpha mean must lie in (0, 1).")
-        if not 0 < finf_mean < 1:
-            raise ValueError("f∞ mean must lie in (0, 1).")
-
-        priors = {
-            "C0": LogNormalPrior(mean=np.log(c0_mean), sigma=c0_sigma),
-            "k": LogNormalPrior(mean=np.log(k_mean), sigma=k_sigma),
-            "alpha": BetaPrior(
-                a=alpha_mean * alpha_conc,
-                b=(1.0 - alpha_mean) * alpha_conc,
-            ),
-            "f_inf": BetaPrior(
-                a=finf_mean * finf_conc,
-                b=(1.0 - finf_mean) * finf_conc,
-            ),
-        }
-
-        params_order = ["C0", "k", "alpha", "f_inf"]
-        results: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
-        for horizon in horizons:
-            label = f"Y({horizon})"
-            results[label] = sobol_analysis(
-                priors,
-                qoi_capacitance(horizon),
-                n_samples=samples,
-                n_bootstrap=bootstrap,
-            )
-            results[f"Δ({horizon})"] = sobol_analysis(
-                priors,
-                qoi_deficit(horizon),
-                n_samples=samples,
-                n_bootstrap=bootstrap,
-            )
-        for threshold in thresholds:
-            label = f"T({threshold})"
-            results[label] = sobol_analysis(
-                priors,
-                qoi_failure_time(threshold),
-                n_samples=samples,
-                n_bootstrap=bootstrap,
-            )
-
-        lines = [
-            "Fractional-order kinetics sensitivity study",
-            "Equation: C(t) = C₀ [f∞ + (1 - f∞) E_α(-k t^α)]",
-            f"C₀ ~ LogNormal(mean={c0_mean:.4g}, sigma={c0_sigma:.3f})",
-            f"k ~ LogNormal(mean={k_mean:.4g}, sigma={k_sigma:.3f})",
-            f"α ~ Beta(a={alpha_mean * alpha_conc:.3f}, b={(1 - alpha_mean) * alpha_conc:.3f})",
-            f"f∞ ~ Beta(a={finf_mean * finf_conc:.3f}, b={(1 - finf_mean) * finf_conc:.3f})",
-            "",
-        ]
-        for label, data in results.items():
-            S = np.asarray(data["S"], dtype=float)
-            ST = np.asarray(data["S_total"], dtype=float)
-            main_idx = int(np.argmax(S))
-            total_idx = int(np.argmax(ST))
-            lines.append(
-                f"{label}: S={S.round(3).tolist()} ST={ST.round(3).tolist()} | strongest main={params_order[main_idx]} strongest total={params_order[total_idx]}"
-            )
-
-        return {
-            "results": results,
-            "log": "\n".join(lines),
-        }
-
-    def _on_sensitivity_study_success(self, payload: object) -> None:
-        QApplication.restoreOverrideCursor()
-        self._active_worker = None
-        self._stop_progress("Sensitivity study complete.")
-
-        if not isinstance(payload, dict):
-            QMessageBox.information(self, "Sensitivity study", "Analysis finished.")
-            self._update_sensitivity_mode()
-            return
-
-        self.sens_log.setPlainText(payload.get("log", ""))
-        self.sens_study_results = payload.get("results")
-        self._update_sensitivity_study_plot()
-        self._update_sensitivity_mode()
-
-    def _on_sensitivity_study_error(self, message: str) -> None:
-        QApplication.restoreOverrideCursor()
-        self._active_worker = None
-        self.status_label.setText("Ready")
-        QMessageBox.critical(self, "Sensitivity study failed", message or "Unknown error during analysis.")
-        self._update_sensitivity_mode()
-
-    def _update_sensitivity_study_plot(self) -> None:
-        if not MATPLOTLIB_AVAILABLE or not getattr(self, "sens_study_results", None):
-            return
-        params = ["C0", "k", "alpha", "f_inf"]
-        self.sens_study_fig.clf()
-        n_plots = len(self.sens_study_results)
-        if n_plots == 0:
-            self.sens_study_canvas.draw()
-            return
-        for idx, (label, data) in enumerate(self.sens_study_results.items(), start=1):
-            ax = self.sens_study_fig.add_subplot(n_plots, 1, idx)
-            S = np.asarray(data["S"], dtype=float)
-            ST = np.asarray(data["S_total"], dtype=float)
-            x = np.arange(len(params))
-            width = 0.35
-            ax.bar(x - width / 2, S, width, label="Main", color=BAR_MAIN_COLOR, alpha=0.85)
-            ax.bar(x + width / 2, ST, width, label="Total", color=BAR_TOTAL_COLOR, alpha=0.7)
-            ci = data.get("S_ci")
-            if isinstance(ci, np.ndarray) and ci.shape[0] == 2:
-                ax.errorbar(
-                    x - width / 2,
-                    S,
-                    yerr=np.vstack([S - ci[0], ci[1] - S]),
-                    fmt="none",
-                    ecolor="#2f3b4c",
-                    elinewidth=0.9,
-                    capsize=3,
-                )
-            ci_total = data.get("S_total_ci")
-            if isinstance(ci_total, np.ndarray) and ci_total.shape[0] == 2:
-                ax.errorbar(
-                    x + width / 2,
-                    ST,
-                    yerr=np.vstack([ST - ci_total[0], ci_total[1] - ST]),
-                    fmt="none",
-                    ecolor="#3f525f",
-                    elinewidth=0.9,
-                    capsize=3,
-                )
-            ax.set_xticks(x)
-            ax.set_xticklabels(params)
-            ax.set_ylim(0.0, 1.05)
-            ax.grid(True, axis="y", alpha=0.25)
-            ax.set_title(label)
-            if idx == 1:
-                ax.legend(frameon=True, framealpha=0.8)
-        self.sens_study_fig.tight_layout()
-        self.sens_study_canvas.draw()
-
-    def _save_sensitivity_study_plot(self) -> None:
-        if not (MATPLOTLIB_AVAILABLE and getattr(self, "sens_study_fig", None) and self.sens_study_results):
-            QMessageBox.warning(self, "Save sensitivity plot", "Run the sensitivity study before saving a plot.")
-            return
-        path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Save sensitivity study plot",
-            str((self.output_dir / "fk_sensitivity_study").with_suffix(".png")),
-            "PNG (*.png);;PDF (*.pdf);;SVG (*.svg)",
-        )
-        if not path:
-            return
-        try:
-            self.sens_study_fig.savefig(path, dpi=300, facecolor="white", bbox_inches="tight")
-        except Exception as exc:
-            QMessageBox.critical(self, "Save sensitivity plot", str(exc))
 
     def _start_progress(self, message: str) -> None:
         self.status_label.setText(message)
@@ -1510,14 +1319,23 @@ class FractionalWindow(QMainWindow):
         self._update_sensitivity_plot()
 
     def _update_sensitivity_plot(self) -> None:
+        """
+        Render Sobol indices using the unified _draw_sobol_panel helper.
+
+        Mode-aware: displays forecast-backed results (priors anchored at MAP fit)
+        or prior-sweep results (data-free parameter space exploration).
+        """
         if not MATPLOTLIB_AVAILABLE or not getattr(self, "sens_data", None):
             return
+
         key = self.sens_qoi_combo.currentText()
         data = self.sens_data.get(key)
         if not data:
             self.sens_fig.clf()
             self.sens_canvas.draw()
             return
+
+        # Handle error case
         if isinstance(data, dict) and "error" in data and not {"S", "S_total"} <= set(data.keys()):
             self.sens_fig.clf()
             ax_msg = self.sens_fig.add_subplot(111)
@@ -1536,39 +1354,18 @@ class FractionalWindow(QMainWindow):
                 self.save_sensitivity_btn.setEnabled(False)
             return
 
+        # Extract Sobol data
         params = ["C0", "k", "alpha", "f_inf"]
         S = np.asarray(data["S"], dtype=float)
         ST = np.asarray(data["S_total"], dtype=float)
         S_ci = np.asarray(data.get("S_ci"), dtype=float) if data.get("S_ci") is not None else None
         ST_ci = np.asarray(data.get("S_total_ci"), dtype=float) if data.get("S_total_ci") is not None else None
+
+        # Draw using unified helper
         self.sens_fig.clf()
-        ax1 = self.sens_fig.add_subplot(211)
-        ax2 = self.sens_fig.add_subplot(212)
-        x = np.arange(len(params))
-        bar1 = ax1.bar(x, S, color=BAR_MAIN_COLOR, alpha=0.85)
-        bar2 = ax2.bar(x, ST, color=BAR_TOTAL_COLOR, alpha=0.85)
-        if S_ci is not None and S_ci.shape[0] == 2:
-            lower, upper = S_ci
-            yerr = np.vstack([S - lower, upper - S])
-            ax1.errorbar(x, S, yerr=yerr, fmt='none', ecolor='#2f3b4c', elinewidth=1.0, capsize=4)
-        if ST_ci is not None and ST_ci.shape[0] == 2:
-            lower, upper = ST_ci
-            yerr = np.vstack([ST - lower, upper - ST])
-            ax2.errorbar(x, ST, yerr=yerr, fmt='none', ecolor='#3f525f', elinewidth=1.0, capsize=4)
-        ax1.set_xticks(x)
-        ax1.set_xticklabels(params)
-        ax1.set_ylabel("First-order S")
-        ax1.set_title(key)
-        ax1.grid(True, axis="y", alpha=0.25)
-        ax2.set_xticks(x)
-        ax2.set_xticklabels(params)
-        ax2.set_ylabel("Total S")
-        ax2.grid(True, axis="y", alpha=0.25)
-        for ax in (ax1, ax2):
-            ax.spines["top"].set_visible(False)
-            ax.spines["right"].set_visible(False)
-        ax1.tick_params(axis="x", labelsize=9)
-        ax2.tick_params(axis="x", labelsize=9)
+        ax = self.sens_fig.add_subplot(111)
+        _draw_sobol_panel(ax, S, ST, params, S_ci, ST_ci, title=key)
+
         self.sens_fig.tight_layout()
         if hasattr(self, "save_sensitivity_btn"):
             self.save_sensitivity_btn.setEnabled(True)
