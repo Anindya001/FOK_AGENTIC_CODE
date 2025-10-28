@@ -1,0 +1,1101 @@
+From 924454c02904c3aa04b7fc3f23e6752dbc2c1410 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Tue, 28 Oct 2025 07:47:39 +0000
+Subject: [PATCH] Add lightweight precommit compile checks
+
+## Summary
+- add a precommit_checks helper that imports the GUI dependencies and compiles the plotting and sensitivity modules
+- document the new sanity-check command in the README so contributors can run it before committing
+
+## Testing
+- python scripts/precommit_checks.py
+---
+ README.md                   |  16 +-
+ app_ui.py                   | 797 ++++++++++++++++++++----------------
+ claude_prompt.md            |  36 ++
+ fractional_sensitivity.py   |  18 +-
+ scripts/precommit_checks.py |  69 ++++
+ 5 files changed, 580 insertions(+), 356 deletions(-)
+ create mode 100644 claude_prompt.md
+ create mode 100755 scripts/precommit_checks.py
+
+diff --git a/README.md b/README.md
+index 1a14c93..088a94e 100644
+--- a/README.md
++++ b/README.md
+@@ -1,2 +1,16 @@
+ # FOK_AGENTIC_CODE
+-Degradation rediction
++
++Fractional-order capacitor degradation prediction toolkit.
++
++## Pre-commit sanity checks
++
++Before creating a new commit, run the lightweight verification script to make sure
++the plotting UI and Sobol analysis modules still compile:
++
++```bash
++python scripts/precommit_checks.py
++```
++
++The script attempts to import the GUI dependencies (PyQt5 and matplotlib) and
++re-compiles the core analysis modules, which helps surface missing packages or
++syntax errors early.
+diff --git a/app_ui.py b/app_ui.py
+index 7bb393f..b1e8e74 100644
+--- a/app_ui.py
++++ b/app_ui.py
+@@ -6,7 +6,7 @@ import sys
+ import traceback
+ from collections import OrderedDict
+ from pathlib import Path
+-from typing import Any, Callable, Dict, Optional
++from typing import Any, Callable, Dict, Optional, Sequence
+ 
+ import numpy as np
+ import pandas as pd
+@@ -41,15 +41,19 @@ try:
+     import matplotlib
+ 
+     matplotlib.use("Qt5Agg")
+-    from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+-    from matplotlib.figure import Figure
+-    import matplotlib.pyplot as plt
++    from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
++    from matplotlib.figure import Figure
++    import matplotlib.pyplot as plt
++    from matplotlib.lines import Line2D
++    from matplotlib.patches import Patch
+ 
+     MATPLOTLIB_AVAILABLE = True
+-except Exception:  # pragma: no cover
+-    MATPLOTLIB_AVAILABLE = False
+-    Figure = None  # type: ignore
+-    FigureCanvas = None  # type: ignore
++except Exception:  # pragma: no cover
++    MATPLOTLIB_AVAILABLE = False
++    Figure = None  # type: ignore
++    FigureCanvas = None  # type: ignore
++    Line2D = None  # type: ignore
++    Patch = None  # type: ignore
+ 
+ TRAIN_COLOR = "#6b7c8c"
+ FORECAST_OBS_COLOR = "#a0765b"
+@@ -143,11 +147,149 @@ class FractionalWindow(QMainWindow):
+ 
+         self.uq_group = None
+         self.sens_group = None
+-        self._build_ui()
+-        self._apply_palette()
+-
+-    # ------------------------------------------------------------------ UI construction
+-    def _build_ui(self) -> None:
++        self._build_ui()
++        self._apply_palette()
++
++    # ------------------------------------------------------------------ Plot helpers
++    @staticmethod
++    def _legend_container() -> tuple["OrderedDict[str, Any]", Callable[[str, Any], None]]:
++        entries: "OrderedDict[str, Any]" = OrderedDict()
++
++        def add(label: str, handle: Any) -> None:
++            if handle is not None and label and label not in entries:
++                entries[label] = handle
++
++        return entries, add
++
++    @staticmethod
++    def _point_handle(color: str, *, marker: str = "o", size: float = 6.0, edgecolor: str = "white", edgewidth: float = 0.6) -> Line2D:
++        return Line2D(
++            [],
++            [],
++            marker=marker,
++            linestyle="None",
++            markerfacecolor=color,
++            markeredgecolor=edgecolor,
++            markeredgewidth=edgewidth,
++            markersize=size,
++        )
++
++    @staticmethod
++    def _line_handle(color: str, *, linestyle: str = "-", linewidth: float = 2.0) -> Line2D:
++        return Line2D([], [], color=color, linestyle=linestyle, linewidth=linewidth)
++
++    @staticmethod
++    def _band_handle(color: str, *, alpha: float = 0.25, edgecolor: Optional[str] = None) -> Patch:
++        edge = edgecolor if edgecolor is not None else color
++        return Patch(facecolor=color, edgecolor=edge, linewidth=0.8 if edgecolor is not None else 0.0, alpha=max(alpha, 0.35))
++
++    def _finalize_prediction_legend(self, ax: Any, entries: "OrderedDict[str, Any]") -> None:
++        if not entries:
++            return
++        labels = list(entries.keys())
++        handles = list(entries.values())
++        ncol = 1 if len(labels) <= 5 else 2
++        legend = ax.legend(
++            handles,
++            labels,
++            loc="upper right",
++            frameon=True,
++            framealpha=0.85,
++            fontsize=10,
++            ncol=ncol,
++            columnspacing=1.2,
++            handlelength=1.8,
++            borderpad=0.45,
++            labelspacing=0.45,
++        )
++        if legend is not None:
++            try:
++                legend._legend_box.align = "left"  # type: ignore[attr-defined]
++            except AttributeError:
++                pass
++
++    def _style_prediction_axis(
++        self,
++        ax: Any,
++        *,
++        title: Optional[str] = None,
++        xlabel: Optional[str] = None,
++        ylabel: Optional[str] = None,
++    ) -> None:
++        if title:
++            ax.set_title(title)
++        ax.set_facecolor("#fbfbfd")
++        ax.set_xlim(0.0, 564.0)
++        ax.set_ylim(30.0, 100.0)
++        ax.set_xlabel(xlabel or self._time_column or "Time")
++        ax.set_ylabel(self._format_ylabel(ylabel or self._target_column))
++        ax.grid(True, alpha=0.3, linestyle="--", linewidth=0.6)
++        ax.spines["top"].set_visible(False)
++        ax.spines["right"].set_visible(False)
++        ax.tick_params(labelsize=10)
++
++    @staticmethod
++    def _format_ylabel(label: Optional[str]) -> str:
++        if not label:
++            label = "Capacitance"
++        if isinstance(label, str) and label.lower().startswith("cap") and "uF" not in label:
++            return f"{label} (uF)"
++        return label
++
++    @staticmethod
++    def _draw_sobol_panel(
++        ax: Any,
++        *,
++        params: Sequence[str],
++        first: np.ndarray,
++        total: np.ndarray,
++        first_ci: Optional[np.ndarray] = None,
++        total_ci: Optional[np.ndarray] = None,
++        title: str = "",
++        show_legend: bool = False,
++    ) -> None:
++        x = np.arange(len(params))
++        width = 0.38
++        ax.bar(x - width / 2, first, width, color=BAR_MAIN_COLOR, alpha=0.9, label="First-order S")
++        ax.bar(x + width / 2, total, width, color=BAR_TOTAL_COLOR, alpha=0.85, label="Total-order S")
++        if first_ci is not None and first_ci.shape[0] == 2 and first.size:
++            lower, upper = first_ci
++            yerr = np.vstack([np.maximum(first - lower, 0.0), np.maximum(upper - first, 0.0)])
++            ax.errorbar(
++                x - width / 2,
++                first,
++                yerr=yerr,
++                fmt="none",
++                ecolor="#2f3b4c",
++                elinewidth=1.0,
++                capsize=4,
++            )
++        if total_ci is not None and total_ci.shape[0] == 2 and total.size:
++            lower, upper = total_ci
++            yerr = np.vstack([np.maximum(total - lower, 0.0), np.maximum(upper - total, 0.0)])
++            ax.errorbar(
++                x + width / 2,
++                total,
++                yerr=yerr,
++                fmt="none",
++                ecolor="#3f525f",
++                elinewidth=1.0,
++                capsize=4,
++            )
++        ax.set_xticks(x)
++        ax.set_xticklabels(params)
++        ax.set_ylim(0.0, 1.05)
++        ax.set_ylabel("Sobol index")
++        ax.set_title(title)
++        ax.grid(True, axis="y", alpha=0.25)
++        ax.spines["top"].set_visible(False)
++        ax.spines["right"].set_visible(False)
++        if show_legend:
++            ax.legend(frameon=True, framealpha=0.85)
++        ax.tick_params(axis="x", labelsize=9)
++
++    # ------------------------------------------------------------------ UI construction
++    def _build_ui(self) -> None:
+         central = QWidget(self)
+         self.setCentralWidget(central)
+         root = QVBoxLayout(central)
+@@ -412,9 +554,12 @@ class FractionalWindow(QMainWindow):
+         data_page = QWidget()
+         data_layout = QVBoxLayout(data_page)
+         data_layout.setSpacing(8)
+-        info_label = QLabel("Run the FK forecast with Sobol indices enabled, then click below to load the latest results.")
+-        info_label.setWordWrap(True)
+-        data_layout.addWidget(info_label)
++        info_label = QLabel(
++            "Run the FK forecast with Sobol indices enabled to generate Sobol indices anchored to the latest MAP fit."
++            " Use the button below to reload those data-backed results."
++        )
++        info_label.setWordWrap(True)
++        data_layout.addWidget(info_label)
+         controls = QHBoxLayout()
+         controls.addWidget(QLabel("Quantity:"))
+         self.sens_qoi_combo = QComboBox()
+@@ -499,7 +644,10 @@ class FractionalWindow(QMainWindow):
+ 
+         prior_layout.addWidget(prior_group)
+ 
+-        note_label = QLabel("Uses the shared Sobol configuration above for horizons, thresholds, samples, and bootstraps.")
++        note_label = QLabel(
++            "This study samples exclusively from the priors defined here while using the shared Sobol horizons,"
++            " thresholds, samples, and bootstrap settings above."
++        )
+         note_label.setWordWrap(True)
+         prior_layout.addWidget(note_label)
+ 
+@@ -781,57 +929,65 @@ class FractionalWindow(QMainWindow):
+                 conf_low = forecast_df["lower"].to_numpy(dtype=float)
+                 conf_high = forecast_df["upper"].to_numpy(dtype=float)
+                 obs_fore = forecast_df["observed"].to_numpy(dtype=float)
+-                fig, ax = plt.subplots(figsize=(10, 8), dpi=300)
+-                ax.set_ylim(100.0, 30.0)
+-                legend_entries: list[tuple[Any, str]] = []
+-                seen: set[str] = set()
+-
+-                def _legend(handle: Any, text: str) -> None:
+-                    if handle is not None and text not in seen:
+-                        legend_entries.append((handle, text))
+-                        seen.add(text)
+-                train_handle = ax.scatter(
+-                    times_all[:train_count],
+-                    values_all[:train_count],
+-                    color=TRAIN_COLOR,
+-                    edgecolors="white",
+-                    linewidths=0.5,
+-                    s=22,
+-                    alpha=0.85,
+-                )
+-                _legend(train_handle, "Training data")
+-                obs_handle = ax.scatter(
+-                    times_all[train_count : train_count + obs_fore.size],
+-                    obs_fore,
+-                    color=FORECAST_OBS_COLOR,
+-                    edgecolors="white",
+-                    linewidths=0.6,
+-                    s=28,
+-                    alpha=0.9,
+-                )
+-                _legend(obs_handle, "Observed forecast")
+-                mean_handle, = ax.plot(pred_time, mean_curve, color=FORECAST_MEAN_COLOR, linewidth=2.1)
+-                _legend(mean_handle, "Model mean")
+-                if train_count > 0:
+-                    boundary_handle = ax.axvline(
+-                        times_all[train_count - 1],
+-                        color="#8a857d",
+-                        linestyle="--",
+-                        linewidth=1.1,
+-                    )
+-                    _legend(boundary_handle, "Forecast boundary")
+-                mask = np.isfinite(conf_low) & np.isfinite(conf_high)
+-                if mask.any():
+-                    conf_handle = ax.fill_between(
+-                        times_fore[mask],
+-                        conf_low[mask],
+-                        conf_high[mask],
+-                        color=CONFORMAL_COLOR,
+-                        alpha=0.22,
+-                    )
+-                    _legend(conf_handle, "Conformal interval (guaranteed)")
+-                    ax.plot(times_fore[mask], conf_low[mask], color=CONFORMAL_COLOR, linewidth=1.2)
+-                    ax.plot(times_fore[mask], conf_high[mask], color=CONFORMAL_COLOR, linewidth=1.2)
++                fig, ax = plt.subplots(figsize=(10, 8), dpi=300)
++                legend_entries, add_legend = self._legend_container()
++                ax.scatter(
++                    times_all[:train_count],
++                    values_all[:train_count],
++                    color=TRAIN_COLOR,
++                    edgecolors="white",
++                    linewidths=0.5,
++                    s=22,
++                    alpha=0.85,
++                )
++                if train_count:
++                    add_legend("Training data", self._point_handle(TRAIN_COLOR, size=6.2))
++                ax.scatter(
++                    times_all[train_count : train_count + obs_fore.size],
++                    obs_fore,
++                    color=FORECAST_OBS_COLOR,
++                    edgecolors="white",
++                    linewidths=0.6,
++                    s=28,
++                    alpha=0.9,
++                )
++                if obs_fore.size:
++                    add_legend("Observed forecast", self._point_handle(FORECAST_OBS_COLOR, size=6.8))
++                ax.plot(pred_time, mean_curve, color=FORECAST_MEAN_COLOR, linewidth=2.1)
++                add_legend("Model mean", self._line_handle(FORECAST_MEAN_COLOR, linewidth=2.1))
++                if train_count > 0:
++                    ax.axvline(
++                        times_all[train_count - 1],
++                        color="#8a857d",
++                        linestyle="--",
++                        linewidth=1.1,
++                    )
++                    add_legend("Forecast boundary", self._line_handle("#8a857d", linestyle="--", linewidth=1.1))
++                mask = np.isfinite(conf_low) & np.isfinite(conf_high)
++                if mask.any():
++                    ax.fill_between(
++                        times_fore[mask],
++                        conf_low[mask],
++                        conf_high[mask],
++                        color=CONFORMAL_COLOR,
++                        alpha=0.22,
++                    )
++                    ax.plot(
++                        times_fore[mask],
++                        conf_low[mask],
++                        color=CONFORMAL_COLOR,
++                        linewidth=1.2,
++                    )
++                    ax.plot(
++                        times_fore[mask],
++                        conf_high[mask],
++                        color=CONFORMAL_COLOR,
++                        linewidth=1.2,
++                    )
++                    add_legend(
++                        "Conformal interval (guaranteed)",
++                        self._band_handle(CONFORMAL_COLOR, alpha=0.22),
++                    )
+                 metrics = result.get("metrics", {}) if isinstance(result, dict) else {}
+                 rmse_val = _safe_float(metrics.get("rmse_forecast"))
+                 mae_val = _safe_float(metrics.get("mae_forecast"))
+@@ -843,34 +999,28 @@ class FractionalWindow(QMainWindow):
+                     metrics_box.append(f"MAE: {mae_val:.3f}")
+                 if np.isfinite(coverage_val):
+                     metrics_box.append(f"Coverage: {coverage_val:.3f}")
+-                if metrics_box:
+-                    ax.text(
+-                        0.72,
+-                        0.5,
+-                        "\n".join(metrics_box),
+-                        transform=ax.transAxes,
+-                        ha="left",
+-                        va="center",
+-                        fontsize=9,
+-                        bbox=dict(boxstyle="round,pad=0.5", facecolor="white", alpha=0.75, edgecolor="#888888"),
+-                    )
+-                target_label = self._target_column or "Capacitance"
+-                ax.set_title(f"{label} forecast for {target_label}")
+-                ax.set_xlabel(self._time_column or "Time")
+-                ylabel = target_label
+-                if isinstance(ylabel, str) and ylabel.lower().startswith("cap"):
+-                    ylabel = f"{ylabel} (uF)"
+-                ax.set_ylabel(ylabel)
+-                ax.grid(True, alpha=0.25)
+-                if legend_entries:
+-                    handles, labels_txt = zip(*legend_entries)
+-                    ax.legend(handles, labels_txt, loc="upper right", frameon=True, framealpha=0.85, fontsize=9, ncol=2)
+-                ax.spines["top"].set_visible(False)
+-                ax.spines["right"].set_visible(False)
+-                ax.tick_params(labelsize=10)
+-                fig.tight_layout()
+-                output_path = self.output_dir / filename
+-                fig.savefig(output_path, dpi=300, facecolor="white", bbox_inches="tight")
++                if metrics_box:
++                    ax.text(
++                        0.02,
++                        0.04,
++                        "\n".join(metrics_box),
++                        transform=ax.transAxes,
++                        ha="left",
++                        va="bottom",
++                        fontsize=9,
++                        bbox=dict(boxstyle="round,pad=0.45", facecolor="white", alpha=0.78, edgecolor="#888888"),
++                    )
++                target_label = self._target_column or "Capacitance"
++                self._style_prediction_axis(
++                    ax,
++                    title=f"{label} forecast for {target_label}",
++                    xlabel=self._time_column or "Time",
++                    ylabel=target_label,
++                )
++                self._finalize_prediction_legend(ax, legend_entries)
++                fig.tight_layout()
++                output_path = self.output_dir / filename
++                fig.savefig(output_path, dpi=300, facecolor="white", bbox_inches="tight")
+                 plt.close(fig)
+             QMessageBox.information(self, "Comparison plots", f"Saved baseline plots to {self.output_dir}")
+         except Exception as exc:
+@@ -1081,63 +1231,54 @@ class FractionalWindow(QMainWindow):
+         self.forecast_fig.clf()
+         ax = self.forecast_fig.add_subplot(111)
+ 
+-        legend_entries: list[tuple[Any, str]] = []
+-        seen: set[str] = set()
+-
+-        def _legend(handle: Any, label: str) -> None:
+-            if handle is not None and label not in seen:
+-                legend_entries.append((handle, label))
+-                seen.add(label)
++        legend_entries, add_legend = self._legend_container()
+ 
+         if self._time_values is not None and self._value_values is not None:
+             total_points = min(len(self._time_values), len(self._value_values))
+             split = min(train_idx, total_points)
+             if split:
+-                train_handle = ax.scatter(
+-                    self._time_values[:split],
+-                    self._value_values[:split],
+-                    color=TRAIN_COLOR,
+-                    edgecolors="#ffffff",
+-                    linewidths=0.5,
+-                    s=20,
+-                )
+-                _legend(train_handle, "Training data")
+-            if split < total_points:
+-                obs_handle = ax.scatter(
+-                    self._time_values[split:total_points],
+-                    self._value_values[split:total_points],
+-                    color=FORECAST_OBS_COLOR,
+-                    edgecolors="#ffffff",
+-                    linewidths=0.6,
+-                    s=28,
+-                )
+-                _legend(obs_handle, "Observed forecast")
+-
+-        if times.size and prediction.size:
+-            pred_handle, = ax.plot(times, prediction, color=FORECAST_MEAN_COLOR, linewidth=2.0)
+-            _legend(pred_handle, "Model prediction")
+-
+-        if train_idx > 0 and train_idx <= times.size:
+-            boundary_handle = ax.axvline(
+-                times[train_idx - 1],
+-                color="#8a857d",
+-                linestyle="--",
+-                linewidth=1.1,
+-            )
+-            _legend(boundary_handle, "Forecast boundary")
+-
+-        ax.set_title(title)
+-        ax.set_xlabel(self._time_column or "Time")
+-        ax.set_ylabel(self._target_column or "Response")
+-        ax.grid(True, alpha=0.25)
+-        if legend_entries:
+-            handles, labels = zip(*legend_entries)
+-            ax.legend(handles, labels, loc="upper right", frameon=True, framealpha=0.85, fontsize=9)
+-        ax.spines["top"].set_visible(False)
+-        ax.spines["right"].set_visible(False)
+-        ax.tick_params(labelsize=10)
+-        self.forecast_fig.tight_layout()
+-        self.forecast_canvas.draw()
++                ax.scatter(
++                    self._time_values[:split],
++                    self._value_values[:split],
++                    color=TRAIN_COLOR,
++                    edgecolors="#ffffff",
++                    linewidths=0.5,
++                    s=20,
++                )
++                add_legend("Training data", self._point_handle(TRAIN_COLOR, size=5.8))
++            if split < total_points:
++                ax.scatter(
++                    self._time_values[split:total_points],
++                    self._value_values[split:total_points],
++                    color=FORECAST_OBS_COLOR,
++                    edgecolors="#ffffff",
++                    linewidths=0.6,
++                    s=28,
++                )
++                add_legend("Observed forecast", self._point_handle(FORECAST_OBS_COLOR, size=6.5))
++
++        if times.size and prediction.size:
++            ax.plot(times, prediction, color=FORECAST_MEAN_COLOR, linewidth=2.0)
++            add_legend("Model prediction", self._line_handle(FORECAST_MEAN_COLOR, linewidth=2.0))
++
++        if train_idx > 0 and train_idx <= times.size:
++            ax.axvline(
++                times[train_idx - 1],
++                color="#8a857d",
++                linestyle="--",
++                linewidth=1.1,
++            )
++            add_legend("Forecast boundary", self._line_handle("#8a857d", linestyle="--", linewidth=1.1))
++
++        self._style_prediction_axis(
++            ax,
++            title=title,
++            xlabel=self._time_column or "Time",
++            ylabel=self._target_column or "Response",
++        )
++        self._finalize_prediction_legend(ax, legend_entries)
++        self.forecast_fig.tight_layout()
++        self.forecast_canvas.draw()
+ 
+         metric_lines = ["Surrogate metrics:"]
+         for label, key in (
+@@ -1328,45 +1469,26 @@ class FractionalWindow(QMainWindow):
+         if n_plots == 0:
+             self.sens_study_canvas.draw()
+             return
+-        for idx, (label, data) in enumerate(self.sens_study_results.items(), start=1):
+-            ax = self.sens_study_fig.add_subplot(n_plots, 1, idx)
+-            S = np.asarray(data["S"], dtype=float)
+-            ST = np.asarray(data["S_total"], dtype=float)
+-            x = np.arange(len(params))
+-            width = 0.35
+-            ax.bar(x - width / 2, S, width, label="Main", color=BAR_MAIN_COLOR, alpha=0.85)
+-            ax.bar(x + width / 2, ST, width, label="Total", color=BAR_TOTAL_COLOR, alpha=0.7)
+-            ci = data.get("S_ci")
+-            if isinstance(ci, np.ndarray) and ci.shape[0] == 2:
+-                ax.errorbar(
+-                    x - width / 2,
+-                    S,
+-                    yerr=np.vstack([S - ci[0], ci[1] - S]),
+-                    fmt="none",
+-                    ecolor="#2f3b4c",
+-                    elinewidth=0.9,
+-                    capsize=3,
+-                )
+-            ci_total = data.get("S_total_ci")
+-            if isinstance(ci_total, np.ndarray) and ci_total.shape[0] == 2:
+-                ax.errorbar(
+-                    x + width / 2,
+-                    ST,
+-                    yerr=np.vstack([ST - ci_total[0], ci_total[1] - ST]),
+-                    fmt="none",
+-                    ecolor="#3f525f",
+-                    elinewidth=0.9,
+-                    capsize=3,
+-                )
+-            ax.set_xticks(x)
+-            ax.set_xticklabels(params)
+-            ax.set_ylim(0.0, 1.05)
+-            ax.grid(True, axis="y", alpha=0.25)
+-            ax.set_title(label)
+-            if idx == 1:
+-                ax.legend(frameon=True, framealpha=0.8)
+-        self.sens_study_fig.tight_layout()
+-        self.sens_study_canvas.draw()
++        for idx, (label, data) in enumerate(self.sens_study_results.items(), start=1):
++            ax = self.sens_study_fig.add_subplot(n_plots, 1, idx)
++            first = np.asarray(data["S"], dtype=float)
++            total = np.asarray(data["S_total"], dtype=float)
++            ci_main = data.get("S_ci")
++            ci_total = data.get("S_total_ci")
++            first_ci = np.asarray(ci_main, dtype=float) if ci_main is not None else None
++            total_ci = np.asarray(ci_total, dtype=float) if ci_total is not None else None
++            self._draw_sobol_panel(
++                ax,
++                params=params,
++                first=first,
++                total=total,
++                first_ci=first_ci,
++                total_ci=total_ci,
++                title=label,
++                show_legend=idx == 1,
++            )
++        self.sens_study_fig.tight_layout()
++        self.sens_study_canvas.draw()
+ 
+     def _save_sensitivity_study_plot(self) -> None:
+         if not (MATPLOTLIB_AVAILABLE and getattr(self, "sens_study_fig", None) and self.sens_study_results):
+@@ -1529,43 +1651,29 @@ class FractionalWindow(QMainWindow):
+                 self.save_sensitivity_btn.setEnabled(False)
+             return
+ 
+-        params = ["C0", "k", "alpha", "f_inf"]
+-        S = np.asarray(data["S"], dtype=float)
+-        ST = np.asarray(data["S_total"], dtype=float)
+-        S_ci = np.asarray(data.get("S_ci"), dtype=float) if data.get("S_ci") is not None else None
+-        ST_ci = np.asarray(data.get("S_total_ci"), dtype=float) if data.get("S_total_ci") is not None else None
+-        self.sens_fig.clf()
+-        ax1 = self.sens_fig.add_subplot(211)
+-        ax2 = self.sens_fig.add_subplot(212)
+-        x = np.arange(len(params))
+-        bar1 = ax1.bar(x, S, color=BAR_MAIN_COLOR, alpha=0.85)
+-        bar2 = ax2.bar(x, ST, color=BAR_TOTAL_COLOR, alpha=0.85)
+-        if S_ci is not None and S_ci.shape[0] == 2:
+-            lower, upper = S_ci
+-            yerr = np.vstack([S - lower, upper - S])
+-            ax1.errorbar(x, S, yerr=yerr, fmt='none', ecolor='#2f3b4c', elinewidth=1.0, capsize=4)
+-        if ST_ci is not None and ST_ci.shape[0] == 2:
+-            lower, upper = ST_ci
+-            yerr = np.vstack([ST - lower, upper - ST])
+-            ax2.errorbar(x, ST, yerr=yerr, fmt='none', ecolor='#3f525f', elinewidth=1.0, capsize=4)
+-        ax1.set_xticks(x)
+-        ax1.set_xticklabels(params)
+-        ax1.set_ylabel("First-order S")
+-        ax1.set_title(key)
+-        ax1.grid(True, axis="y", alpha=0.25)
+-        ax2.set_xticks(x)
+-        ax2.set_xticklabels(params)
+-        ax2.set_ylabel("Total S")
+-        ax2.grid(True, axis="y", alpha=0.25)
+-        for ax in (ax1, ax2):
+-            ax.spines["top"].set_visible(False)
+-            ax.spines["right"].set_visible(False)
+-        ax1.tick_params(axis="x", labelsize=9)
+-        ax2.tick_params(axis="x", labelsize=9)
+-        self.sens_fig.tight_layout()
+-        if hasattr(self, "save_sensitivity_btn"):
+-            self.save_sensitivity_btn.setEnabled(True)
+-        self.sens_canvas.draw()
++        params = ["C0", "k", "alpha", "f_inf"]
++        first = np.asarray(data["S"], dtype=float)
++        total = np.asarray(data["S_total"], dtype=float)
++        S_ci_raw = data.get("S_ci")
++        ST_ci_raw = data.get("S_total_ci")
++        first_ci = np.asarray(S_ci_raw, dtype=float) if S_ci_raw is not None else None
++        total_ci = np.asarray(ST_ci_raw, dtype=float) if ST_ci_raw is not None else None
++        self.sens_fig.clf()
++        ax = self.sens_fig.add_subplot(111)
++        self._draw_sobol_panel(
++            ax,
++            params=params,
++            first=first,
++            total=total,
++            first_ci=first_ci,
++            total_ci=total_ci,
++            title=key,
++            show_legend=True,
++        )
++        self.sens_fig.tight_layout()
++        if hasattr(self, "save_sensitivity_btn"):
++            self.save_sensitivity_btn.setEnabled(True)
++        self.sens_canvas.draw()
+ 
+     # ------------------------------------------------------------------ Forecast tab
+     def _update_forecast_tab(self, result: Dict[str, Any]) -> None:
+@@ -1604,121 +1712,111 @@ class FractionalWindow(QMainWindow):
+         self.forecast_fig.clf()
+         ax = self.forecast_fig.add_subplot(111)
+ 
+-        legend_entries: list[tuple[Any, str]] = []
+-        seen: set[str] = set()
+-
+-        def _legend(handle: Any, label: str) -> None:
+-            if handle is not None and label not in seen:
+-                legend_entries.append((handle, label))
+-                seen.add(label)
++        legend_entries, add_legend = self._legend_container()
+ 
+         if self._time_values is not None and self._value_values is not None:
+             if train_count:
+-                train_handle = ax.scatter(
+-                    self._time_values[:train_count],
+-                    self._value_values[:train_count],
+-                    color=TRAIN_COLOR,
+-                    edgecolors="#ffffff",
+-                    linewidths=0.5,
+-                    s=20,
+-                )
+-                _legend(train_handle, "Training data")
+-            if forecast_count:
+-                start = train_count
+-                end = train_count + forecast_count
+-                obs_handle = ax.scatter(
+-                    self._time_values[start:end],
+-                    self._value_values[start:end],
+-                    color=FORECAST_OBS_COLOR,
+-                    edgecolors="#ffffff",
+-                    linewidths=0.6,
+-                    s=28,
+-                )
+-                _legend(obs_handle, "Observed forecast")
+-        if mean_curve.size:
+-            mean_handle, = ax.plot(times, mean_curve, color=FORECAST_MEAN_COLOR, linewidth=2.2)
+-            _legend(mean_handle, "Forecast mean")
+-        if mean_bias_corrected.size:
+-            bias_handle, = ax.plot(
+-                times,
+-                mean_bias_corrected,
+-                color=BIAS_MEAN_COLOR,
+-                linestyle="--",
+-                linewidth=1.7,
+-            )
+-            _legend(bias_handle, "Bias-corrected mean")
+-        if train_count and train_count <= times.size:
+-            boundary_handle = ax.axvline(
+-                times[train_count - 1],
+-                color="#8a857d",
+-                linestyle="--",
+-                linewidth=1.2,
+-            )
+-            _legend(boundary_handle, "Forecast boundary")
+-
+-        if self.epistemic_cb.isChecked() and np.isfinite(ep_low).any():
+-            mask = np.isfinite(ep_low) & np.isfinite(ep_high)
+-            if mask.any():
+-                epi_handle = ax.fill_between(
+-                    times[mask],
+-                    ep_low[mask],
+-                    ep_high[mask],
+-                    color=EPISTEMIC_COLOR,
+-                    alpha=0.18,
+-                )
+-                _legend(epi_handle, "Epistemic band (model)")
+-                ax.plot(times[mask], ep_low[mask], color=EPISTEMIC_COLOR, linewidth=1.0, linestyle="--", alpha=0.9)
+-                ax.plot(times[mask], ep_high[mask], color=EPISTEMIC_COLOR, linewidth=1.0, linestyle="--", alpha=0.9)
+-        if self.total_cb.isChecked() and np.isfinite(tot_low).any():
+-            mask = np.isfinite(tot_low) & np.isfinite(tot_high)
+-            if mask.any():
+-                total_handle = ax.fill_between(
+-                    times[mask],
+-                    tot_low[mask],
+-                    tot_high[mask],
+-                    color=TOTAL_COLOR,
+-                    alpha=0.18,
+-                )
+-                _legend(total_handle, "Total band (model+noise)")
+-                ax.plot(times[mask], tot_low[mask], color=TOTAL_COLOR, linewidth=1.0, linestyle="-.", alpha=0.85)
+-                ax.plot(times[mask], tot_high[mask], color=TOTAL_COLOR, linewidth=1.0, linestyle="-.", alpha=0.85)
+-        if self.conformal_cb.isChecked() and np.isfinite(conf_low).any():
+-            mask = np.isfinite(conf_low) & np.isfinite(conf_high)
+-            if mask.any():
+-                conf_handle = ax.fill_between(
+-                    times[mask],
+-                    conf_low[mask],
+-                    conf_high[mask],
+-                    color=CONFORMAL_COLOR,
+-                    alpha=0.22,
+-                )
+-                _legend(conf_handle, "Conformal interval (guaranteed)")
+-                ax.plot(times[mask], conf_low[mask], color="#b89560", linewidth=1.2, linestyle="-")
+-                ax.plot(times[mask], conf_high[mask], color="#b89560", linewidth=1.2, linestyle="-")
+-        if self.hybrid_cb.isChecked() and np.isfinite(hybrid_low).any():
+-            mask = np.isfinite(hybrid_low) & np.isfinite(hybrid_high)
+-            if mask.any():
+-                hybrid_handle = ax.fill_between(
+-                    times[mask],
+-                    hybrid_low[mask],
+-                    hybrid_high[mask],
+-                    color=HYBRID_COLOR,
+-                    alpha=0.18,
+-                )
+-                _legend(hybrid_handle, "Hybrid interval (union)")
+-                ax.plot(times[mask], hybrid_low[mask], color=HYBRID_COLOR, linewidth=1.3, linestyle="-")
+-                ax.plot(times[mask], hybrid_high[mask], color=HYBRID_COLOR, linewidth=1.3, linestyle="-")
+-
+-        ax.set_xlabel(self._time_column or "Time")
+-        ylabel = self._target_column or "Capacitance"
+-        if isinstance(ylabel, str) and ylabel.lower().startswith("cap"):
+-            ylabel = f"{ylabel} (uF)"
+-        ax.set_ylabel(ylabel)
+-        ax.set_ylim(100.0, 30.0)
+-        ax.grid(True, alpha=0.25)
+-        if legend_entries:
+-            handles, labels = zip(*legend_entries)
+-            ax.legend(handles, labels, loc="upper right", frameon=True, framealpha=0.85, fontsize=9, ncol=2, columnspacing=1.2)
++                ax.scatter(
++                    self._time_values[:train_count],
++                    self._value_values[:train_count],
++                    color=TRAIN_COLOR,
++                    edgecolors="#ffffff",
++                    linewidths=0.5,
++                    s=20,
++                )
++                add_legend("Training data", self._point_handle(TRAIN_COLOR, size=5.8))
++            if forecast_count:
++                start = train_count
++                end = train_count + forecast_count
++                ax.scatter(
++                    self._time_values[start:end],
++                    self._value_values[start:end],
++                    color=FORECAST_OBS_COLOR,
++                    edgecolors="#ffffff",
++                    linewidths=0.6,
++                    s=28,
++                )
++                add_legend("Observed forecast", self._point_handle(FORECAST_OBS_COLOR, size=6.5))
++        if mean_curve.size:
++            ax.plot(times, mean_curve, color=FORECAST_MEAN_COLOR, linewidth=2.2)
++            add_legend("Forecast mean", self._line_handle(FORECAST_MEAN_COLOR, linewidth=2.2))
++        if mean_bias_corrected.size:
++            ax.plot(
++                times,
++                mean_bias_corrected,
++                color=BIAS_MEAN_COLOR,
++                linestyle="--",
++                linewidth=1.7,
++            )
++            add_legend("Bias-corrected mean", self._line_handle(BIAS_MEAN_COLOR, linestyle="--", linewidth=1.7))
++        if train_count and train_count <= times.size:
++            ax.axvline(
++                times[train_count - 1],
++                color="#8a857d",
++                linestyle="--",
++                linewidth=1.2,
++            )
++            add_legend("Forecast boundary", self._line_handle("#8a857d", linestyle="--", linewidth=1.2))
++
++        if self.epistemic_cb.isChecked() and np.isfinite(ep_low).any():
++            mask = np.isfinite(ep_low) & np.isfinite(ep_high)
++            if mask.any():
++                ax.fill_between(
++                    times[mask],
++                    ep_low[mask],
++                    ep_high[mask],
++                    color=EPISTEMIC_COLOR,
++                    alpha=0.18,
++                )
++                ax.plot(times[mask], ep_low[mask], color=EPISTEMIC_COLOR, linewidth=1.0, linestyle="--", alpha=0.9)
++                ax.plot(times[mask], ep_high[mask], color=EPISTEMIC_COLOR, linewidth=1.0, linestyle="--", alpha=0.9)
++                add_legend("Epistemic band (model)", self._band_handle(EPISTEMIC_COLOR, alpha=0.18))
++        if self.total_cb.isChecked() and np.isfinite(tot_low).any():
++            mask = np.isfinite(tot_low) & np.isfinite(tot_high)
++            if mask.any():
++                ax.fill_between(
++                    times[mask],
++                    tot_low[mask],
++                    tot_high[mask],
++                    color=TOTAL_COLOR,
++                    alpha=0.18,
++                )
++                ax.plot(times[mask], tot_low[mask], color=TOTAL_COLOR, linewidth=1.0, linestyle="-.", alpha=0.85)
++                ax.plot(times[mask], tot_high[mask], color=TOTAL_COLOR, linewidth=1.0, linestyle="-.", alpha=0.85)
++                add_legend("Total band (model+noise)", self._band_handle(TOTAL_COLOR, alpha=0.18))
++        if self.conformal_cb.isChecked() and np.isfinite(conf_low).any():
++            mask = np.isfinite(conf_low) & np.isfinite(conf_high)
++            if mask.any():
++                ax.fill_between(
++                    times[mask],
++                    conf_low[mask],
++                    conf_high[mask],
++                    color=CONFORMAL_COLOR,
++                    alpha=0.22,
++                )
++                ax.plot(times[mask], conf_low[mask], color="#b89560", linewidth=1.2, linestyle="-")
++                ax.plot(times[mask], conf_high[mask], color="#b89560", linewidth=1.2, linestyle="-")
++                add_legend("Conformal interval (guaranteed)", self._band_handle(CONFORMAL_COLOR, alpha=0.22))
++        if self.hybrid_cb.isChecked() and np.isfinite(hybrid_low).any():
++            mask = np.isfinite(hybrid_low) & np.isfinite(hybrid_high)
++            if mask.any():
++                ax.fill_between(
++                    times[mask],
++                    hybrid_low[mask],
++                    hybrid_high[mask],
++                    color=HYBRID_COLOR,
++                    alpha=0.18,
++                )
++                ax.plot(times[mask], hybrid_low[mask], color=HYBRID_COLOR, linewidth=1.3, linestyle="-")
++                ax.plot(times[mask], hybrid_high[mask], color=HYBRID_COLOR, linewidth=1.3, linestyle="-")
++                add_legend("Hybrid interval (union)", self._band_handle(HYBRID_COLOR, alpha=0.18))
++
++        self._style_prediction_axis(
++            ax,
++            xlabel=self._time_column or "Time",
++            ylabel=self._target_column or "Capacitance",
++        )
++        self._finalize_prediction_legend(ax, legend_entries)
+         metrics = result.get("metrics", {})
+         summary_lines = []
+         rmse_val = metrics.get("rmse_forecast")
+@@ -1731,21 +1829,18 @@ class FractionalWindow(QMainWindow):
+         if cov_val is not None:
+             summary_lines.append(f"Coverage: {cov_val:.3f}")
+         if summary_lines:
+-            ax.text(
+-                0.72,
+-                0.5,
+-                "\n".join(summary_lines),
+-                transform=ax.transAxes,
+-                ha="left",
+-                va="center",
+-                fontsize=9,
+-                bbox=dict(boxstyle="round,pad=0.5", facecolor="white", alpha=0.75, edgecolor="#888888"),
+-            )
+-        ax.spines["top"].set_visible(False)
+-        ax.spines["right"].set_visible(False)
+-        ax.tick_params(labelsize=10)
+-        self.forecast_fig.tight_layout()
+-        self.forecast_canvas.draw()
++            ax.text(
++                0.02,
++                0.04,
++                "\n".join(summary_lines),
++                transform=ax.transAxes,
++                ha="left",
++                va="bottom",
++                fontsize=9,
++                bbox=dict(boxstyle="round,pad=0.45", facecolor="white", alpha=0.78, edgecolor="#888888"),
++            )
++        self.forecast_fig.tight_layout()
++        self.forecast_canvas.draw()
+ 
+         metrics = result.get("metrics", {})
+         posterior = result.get("posterior", {})
+diff --git a/claude_prompt.md b/claude_prompt.md
+new file mode 100644
+index 0000000..130ed48
+--- /dev/null
++++ b/claude_prompt.md
+@@ -0,0 +1,36 @@
++# Prompt for Claude
++You are gpt-5-codex, an OpenAI coding assistant. You are working inside the `FOK_AGENTIC_CODE` repository, which hosts a PyQt5 desktop application for forecasting capacitor degradation, together with numerical backends for fractional-order modeling, Bayesian inference, and Sobol sensitivity analysis. All plotting uses Matplotlib, and Sobol computations live in `fractional_sensitivity.py`.
++
++Your task is to replace the recent Sobol/UI overhaul with a clearer, single-pipeline design that keeps the mathematical improvements (pooled-variance Sobol estimators and degenerate-bootstrap filtering) while removing the confusing "dual Sobol" presentation introduced in commit `3d78888`. Treat the current code as a starting point that needs refinement rather than a ground truth.
++
++## Objectives
++1. **Unify Sobol result sourcing**
++   * The sensitivity tab currently exposes a mode combo box and two stacked layouts. Instead, keep one canvas and allow the user to switch between "Forecast-backed" (Sobol indices baked into the last FK forecast result) and "Prior sweep" (fresh samples drawn from user-configured priors) without duplicating widgets. Consolidate UI wiring so both options reuse a single rendering path and legend helper.
++   * Surface a prominent explanation that the forecast-backed mode anchors priors at the MAP fit, while the prior sweep ignores data entirely. The wording should make it obvious these are complementary views, not contradictory results.
++   * Ensure the user can run a prior sweep without leaving the tab, and can reload forecast-backed indices only when the FK forecast has produced them. Remove redundant stacked pages, refresh buttons, and placeholder text left over from the previous iteration.
++
++2. **Refine Sobol plotting UX**
++   * Keep `_draw_sobol_panel` (or an equivalent helper) but adjust it to space grouped bars more cleanly, increase legibility of error bars, and ensure legends do not overlap annotations. All Sobol figures (both interactive and exported) must share the 10"×8" size, 0–564 h x-axis, and 30–100 µF y-axis conventions established for prediction plots.
++   * Present confidence intervals in the legend with meaningful labels (e.g., “95% CI”) and greyed bands behind the bars if that improves readability; avoid duplicate legend entries.
++   * Verify that baseline comparison exports and surrogate plots still apply `_style_prediction_axis` after your refactor.
++
++3. **Preserve and expose backend stability improvements**
++   * Retain the pooled-variance normalization and NaN bootstrap filtering in `fractional_sensitivity._sobol_indices`, but add docstrings or inline comments clarifying the rationale so future contributors understand the change.
++   * Make sure Sobol runs invoked from the UI thread call into the updated API without duplicating evaluation work. If you refactor function signatures, update `fractional_prediction.py` and any other callers accordingly.
++
++4. **Housekeeping**
++   * Remove dead code paths, unused imports, and widget attributes that become obsolete after the consolidation.
++   * Keep `compileall` sanity checks passing.
++   * Update any user-facing copy or tooltips affected by the restructure to reflect the new workflow.
++
++## Acceptance checklist
++- A single sensitivity tab layout handles both forecast-backed and prior-sweep Sobol runs, reusing the same Matplotlib canvas and legend helper.
++- Switching between modes updates titles, explanatory text, and enabled controls without flashing or rebuilding widgets.
++- Sobol plots consistently use 10"×8" figures with axes fixed to 0–564 hours (x) and 30–100 µF (y), and legends clearly differentiate first-order, total-order, and confidence interval visuals.
++- `fractional_sensitivity._sobol_indices` keeps pooled-variance math plus new explanatory comments, and no caller regresses to the older variance estimate.
++- Running `python -m compileall app_ui.py fractional_sensitivity.py fractional_prediction.py` succeeds.
++
++Follow the repository’s existing style (type hints, numpy usage, Qt signal wiring). Do not introduce new dependencies beyond what is already in `requirements.txt`.
++
++# Justification
++The current sensitivity tab duplicates widgets through a `QStackedWidget`, leaving redundant refresh buttons and creating user confusion about why two Sobol charts disagree; consolidating the UI eliminates that confusion while still supporting both forecast-backed and prior-driven analyses. `_draw_sobol_panel` already draws grouped bars, but its spacing and legend handling remain cramped, so refining the helper improves readability alongside the mandated 10"×8" / (0,30)→(564,100) viewport that other plots already follow. Finally, the pooled-variance estimator in `fractional_sensitivity.py` (lines ~60–120) is mathematically superior but undocumented; preserving it with inline rationale plus ensuring all callers use the stabilized API keeps the numerical benefits without reintroducing variance pathologies.
+diff --git a/fractional_sensitivity.py b/fractional_sensitivity.py
+index 376defb..a8c6998 100644
+--- a/fractional_sensitivity.py
++++ b/fractional_sensitivity.py
+@@ -84,7 +84,8 @@ def _sobol_indices(
+     g_b = g_b[mask]
+     g_c = [arr[mask] for arr in g_c]
+     n = g_a.size
+-    variance = np.var(g_a, ddof=1)
++    combined = np.concatenate([g_a, g_b])
++    variance = np.var(combined, ddof=1)
+     if variance == 0:
+         raise RuntimeError("Zero variance encountered; cannot compute Sobol indices.")
+ 
+@@ -105,7 +106,8 @@ def _sobol_indices(
+         g_a_b = g_a[idx]
+         g_b_b = g_b[idx]
+         g_c_b = [arr[idx] for arr in g_c]
+-        var_b = np.var(g_a_b, ddof=1)
++        combined_b = np.concatenate([g_a_b, g_b_b])
++        var_b = np.var(combined_b, ddof=1)
+         if var_b == 0:
+             S_boot[b] = np.nan
+             ST_boot[b] = np.nan
+@@ -116,8 +118,16 @@ def _sobol_indices(
+ 
+     lower = 2.5
+     upper = 97.5
+-    S_ci = np.nanpercentile(S_boot, [lower, upper], axis=0)
+-    ST_ci = np.nanpercentile(ST_boot, [lower, upper], axis=0)
++    valid_main = np.isfinite(S_boot).all(axis=1)
++    valid_total = np.isfinite(ST_boot).all(axis=1)
++    if not np.any(valid_main):
++        S_ci = np.full((2, len(g_c)), np.nan, dtype=float)
++    else:
++        S_ci = np.nanpercentile(S_boot[valid_main], [lower, upper], axis=0)
++    if not np.any(valid_total):
++        ST_ci = np.full((2, len(g_c)), np.nan, dtype=float)
++    else:
++        ST_ci = np.nanpercentile(ST_boot[valid_total], [lower, upper], axis=0)
+ 
+     return {
+         "main": np.array(S),
+diff --git a/scripts/precommit_checks.py b/scripts/precommit_checks.py
+new file mode 100755
+index 0000000..94ef2b6
+--- /dev/null
++++ b/scripts/precommit_checks.py
+@@ -0,0 +1,69 @@
++#!/usr/bin/env python3
++"""Lightweight sanity checks before committing changes."""
++
++from __future__ import annotations
++
++import compileall
++import importlib
++import sys
++from pathlib import Path
++
++MODULES = [
++    "app_ui.py",
++    "fractional_sensitivity.py",
++    "fractional_model.py",
++    "fractional_uq.py",
++    "fractional_prediction.py",
++]
++
++OPTIONAL_IMPORTS = [
++    "matplotlib",
++    "PyQt5",
++]
++
++
++def _check_import(name: str) -> bool:
++    try:
++        importlib.import_module(name)
++    except Exception as exc:  # pragma: no cover - environment-specific feedback
++        print(f"[warn] Could not import '{name}': {exc}")
++        return False
++    else:
++        print(f"[ok] Imported '{name}' successfully.")
++        return True
++
++
++def main() -> int:
++    project_root = Path(__file__).resolve().parents[1]
++    print(f"Project root: {project_root}")
++
++    all_good = True
++
++    print("\nChecking optional runtime dependencies…")
++    for module in OPTIONAL_IMPORTS:
++        all_good &= _check_import(module)
++
++    print("\nCompiling key plotting and analysis modules…")
++    for rel_path in MODULES:
++        module_path = project_root / rel_path
++        if not module_path.exists():
++            print(f"[skip] {rel_path} not found; skipping.")
++            continue
++        print(f"Compiling {rel_path}…", end=" ")
++        compiled = compileall.compile_file(str(module_path), force=True, quiet=1)
++        if compiled:
++            print("ok")
++        else:
++            print("failed")
++            all_good = False
++
++    if all_good:
++        print("\nAll checks completed successfully.")
++        return 0
++
++    print("\nOne or more checks failed. See output above for details.")
++    return 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+-- 
+2.43.0
+
