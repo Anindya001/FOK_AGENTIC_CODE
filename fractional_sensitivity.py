@@ -84,7 +84,8 @@ def _sobol_indices(
     g_b = g_b[mask]
     g_c = [arr[mask] for arr in g_c]
     n = g_a.size
-    variance = np.var(g_a, ddof=1)
+    combined = np.concatenate([g_a, g_b])
+    variance = np.var(combined, ddof=1)
     if variance == 0:
         raise RuntimeError("Zero variance encountered; cannot compute Sobol indices.")
 
@@ -105,7 +106,8 @@ def _sobol_indices(
         g_a_b = g_a[idx]
         g_b_b = g_b[idx]
         g_c_b = [arr[idx] for arr in g_c]
-        var_b = np.var(g_a_b, ddof=1)
+        combined_b = np.concatenate([g_a_b, g_b_b])
+        var_b = np.var(combined_b, ddof=1)
         if var_b == 0:
             S_boot[b] = np.nan
             ST_boot[b] = np.nan
@@ -116,8 +118,16 @@ def _sobol_indices(
 
     lower = 2.5
     upper = 97.5
-    S_ci = np.nanpercentile(S_boot, [lower, upper], axis=0)
-    ST_ci = np.nanpercentile(ST_boot, [lower, upper], axis=0)
+    valid_main = np.isfinite(S_boot).all(axis=1)
+    valid_total = np.isfinite(ST_boot).all(axis=1)
+    if not np.any(valid_main):
+        S_ci = np.full((2, len(g_c)), np.nan, dtype=float)
+    else:
+        S_ci = np.nanpercentile(S_boot[valid_main], [lower, upper], axis=0)
+    if not np.any(valid_total):
+        ST_ci = np.full((2, len(g_c)), np.nan, dtype=float)
+    else:
+        ST_ci = np.nanpercentile(ST_boot[valid_total], [lower, upper], axis=0)
 
     return {
         "main": np.array(S),
