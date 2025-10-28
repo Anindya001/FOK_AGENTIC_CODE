@@ -782,7 +782,8 @@ class FractionalWindow(QMainWindow):
                 conf_high = forecast_df["upper"].to_numpy(dtype=float)
                 obs_fore = forecast_df["observed"].to_numpy(dtype=float)
                 fig, ax = plt.subplots(figsize=(10, 8), dpi=300)
-                ax.set_ylim(100.0, 30.0)
+                ax.set_xlim(0, 564)
+                ax.set_ylim(30.0, 100.0)
                 legend_entries: list[tuple[Any, str]] = []
                 seen: set[str] = set()
 
@@ -1129,6 +1130,8 @@ class FractionalWindow(QMainWindow):
         ax.set_title(title)
         ax.set_xlabel(self._time_column or "Time")
         ax.set_ylabel(self._target_column or "Response")
+        ax.set_xlim(0, 564)
+        ax.set_ylim(30.0, 100.0)
         ax.grid(True, alpha=0.25)
         if legend_entries:
             handles, labels = zip(*legend_entries)
@@ -1714,7 +1717,8 @@ class FractionalWindow(QMainWindow):
         if isinstance(ylabel, str) and ylabel.lower().startswith("cap"):
             ylabel = f"{ylabel} (uF)"
         ax.set_ylabel(ylabel)
-        ax.set_ylim(100.0, 30.0)
+        ax.set_xlim(0, 564)
+        ax.set_ylim(30.0, 100.0)
         ax.grid(True, alpha=0.25)
         if legend_entries:
             handles, labels = zip(*legend_entries)
